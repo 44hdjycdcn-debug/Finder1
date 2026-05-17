@@ -47,7 +47,7 @@ tasks {
     processResources {
         val propertyMap = mapOf(
             "version" to project.version,
-            "minecraft_version" to toMinecraftCompat(libs.versions.minecraft.get()),
+            "minecraft_version" to "~1.21",
             "jdk_version" to libs.versions.jdk.get(),
         )
 
