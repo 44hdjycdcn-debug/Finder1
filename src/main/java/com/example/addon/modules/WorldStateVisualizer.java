@@ -19,6 +19,7 @@ import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
 import net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket;
+import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 import net.minecraft.network.protocol.game.ClientboundSoundPacket;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.world.entity.EntityType;
@@ -133,7 +134,11 @@ public class WorldStateVisualizer extends Module {
 
     public final Map<Integer, CachedPoint> cachedPoints = new ConcurrentHashMap<>();
     public final Set<ChunkPos> notableChunks = ConcurrentHashMap.newKeySet();
+    private final Set<ChunkPos> pendingChunkScans = ConcurrentHashMap.newKeySet();
+    private final Set<Integer> seenSpawnerIds = ConcurrentHashMap.newKeySet();
+    private final Set<Long> seenChunkKeys = ConcurrentHashMap.newKeySet();
     private final Color tempSide = new Color();
+    private final Color tempChunkFill = new Color();
     private int tickCounter = 0;
 
     public WorldStateVisualizer() {
@@ -147,6 +152,9 @@ public class WorldStateVisualizer extends Module {
     public void onDeactivate() {
         cachedPoints.clear();
         notableChunks.clear();
+        pendingChunkScans.clear();
+        seenSpawnerIds.clear();
+        seenChunkKeys.clear();
     }
 
     @EventHandler
@@ -164,13 +172,13 @@ public class WorldStateVisualizer extends Module {
             Vec3 pos = packet.values().position();
             updatePosition(packet.id(), pos.x, pos.y, pos.z);
 
+        } else if (event.packet instanceof ClientboundLevelChunkWithLightPacket packet) {
+            pendingChunkScans.add(new ChunkPos(packet.getX(), packet.getZ()));
+
         } else if (event.packet instanceof ClientboundBlockEntityDataPacket packet) {
             var key = BuiltInRegistries.BLOCK_ENTITY_TYPE.getKey(packet.getType());
             if (key == null || !key.toString().equals("minecraft:mob_spawner")) return;
-            BlockPos pos = packet.getPos();
-            ChunkPos chunk = new ChunkPos(pos);
-            cachePoint(new CachedPoint(pos.hashCode(), pos.getX(), pos.getY(), pos.getZ(), PointType.BLOCK_ENTITY, System.currentTimeMillis(), chunk));
-            notableChunks.add(chunk);
+            notifyAndCacheSpawner(packet.getPos(), System.currentTimeMillis());
 
         } else if (event.packet instanceof ClientboundSoundPacket packet) {
             if (!cacheAudioCues.get()) return;
@@ -210,9 +218,37 @@ public class WorldStateVisualizer extends Module {
     private void onTick(TickEvent.Post event) {
         if (!active.get() || mc.level == null || mc.player == null) return;
         pruneCache();
-        if (++tickCounter >= 100) {
+        if (!pendingChunkScans.isEmpty()) {
+            Set<ChunkPos> batch = new java.util.HashSet<>(pendingChunkScans);
+            pendingChunkScans.clear();
+            for (ChunkPos cp : batch) scanChunkForSpawners(cp);
+        }
+        if (++tickCounter >= 60) {
             tickCounter = 0;
             scanForSpawners();
+        }
+    }
+
+    private void scanChunkForSpawners(ChunkPos cp) {
+        if (!mc.level.hasChunk(cp.x, cp.z)) return;
+        LevelChunk chunk = (LevelChunk) mc.level.getChunk(cp.x, cp.z);
+        long now = System.currentTimeMillis();
+        for (BlockPos pos : chunk.getBlockEntitiesPos()) {
+            if (mc.level.getBlockEntity(pos) instanceof SpawnerBlockEntity) {
+                notifyAndCacheSpawner(pos, now);
+            }
+        }
+    }
+
+    private void notifyAndCacheSpawner(BlockPos pos, long now) {
+        int id = pos.hashCode();
+        ChunkPos cp = new ChunkPos(pos);
+        cachePoint(new CachedPoint(id, pos.getX(), pos.getY(), pos.getZ(), PointType.BLOCK_ENTITY, now, cp));
+        if (seenSpawnerIds.add(id)) {
+            info("Spawner found at " + pos.getX() + ", " + pos.getY() + ", " + pos.getZ());
+            if (seenChunkKeys.add(cp.toLong())) {
+                info("Suspicious chunk at " + cp.x + ", " + cp.z);
+            }
         }
     }
 
@@ -220,16 +256,9 @@ public class WorldStateVisualizer extends Module {
         int chunkRadius = (cacheRange.get() >> 4) + 1;
         int playerChunkX = mc.player.chunkPosition().x;
         int playerChunkZ = mc.player.chunkPosition().z;
-        long now = System.currentTimeMillis();
         for (int cx = playerChunkX - chunkRadius; cx <= playerChunkX + chunkRadius; cx++) {
             for (int cz = playerChunkZ - chunkRadius; cz <= playerChunkZ + chunkRadius; cz++) {
-                if (!mc.level.hasChunk(cx, cz)) continue;
-                LevelChunk chunk = (LevelChunk) mc.level.getChunk(cx, cz);
-                for (BlockPos pos : chunk.getBlockEntitiesPos()) {
-                    if (!(mc.level.getBlockEntity(pos) instanceof SpawnerBlockEntity)) continue;
-                    ChunkPos chunkPos = new ChunkPos(pos);
-                    cachePoint(new CachedPoint(pos.hashCode(), pos.getX(), pos.getY(), pos.getZ(), PointType.BLOCK_ENTITY, now, chunkPos));
-                }
+                scanChunkForSpawners(new ChunkPos(cx, cz));
             }
         }
     }
@@ -274,12 +303,14 @@ public class WorldStateVisualizer extends Module {
 
         int minY = mc.level.getMinY();
         int maxY = minY + mc.level.getHeight();
+        SettingColor chunkLine = notableChunkColor.get();
+        tempChunkFill.set(chunkLine.r, chunkLine.g, chunkLine.b, 18);
         for (ChunkPos chunk : notableChunks) {
             int x1 = chunk.getMinBlockX();
             int z1 = chunk.getMinBlockZ();
             int x2 = chunk.getMaxBlockX() + 1;
             int z2 = chunk.getMaxBlockZ() + 1;
-            event.renderer.box(x1, minY, z1, x2, maxY, z2, notableChunkColor.get(), notableChunkColor.get(), ShapeMode.Both, 0);
+            event.renderer.box(x1, minY, z1, x2, maxY, z2, tempChunkFill, chunkLine, ShapeMode.Both, 0);
         }
 
         for (CachedPoint point : cachedPoints.values()) {
@@ -294,7 +325,7 @@ public class WorldStateVisualizer extends Module {
         }
 
         if (renderIndicators.get() && mc.player != null) {
-            Vec3 eye = mc.player.getEyePosition();
+            Vec3 eye = mc.player.getEyePosition(event.tickDelta);
             double range = cacheRange.get();
             for (CachedPoint point : cachedPoints.values()) {
                 double dx = point.x() - mc.player.getX();
