@@ -153,7 +153,7 @@ public class WorldStateVisualizer extends Module {
         if (event.packet instanceof ClientboundAddEntityPacket packet) {
             if (packet.getType() != EntityType.PLAYER) return;
             double x = packet.getX(), y = packet.getY(), z = packet.getZ();
-            ChunkPos chunk = ChunkPos.containing(BlockPos.containing(x, y, z));
+            ChunkPos chunk = new ChunkPos(BlockPos.containing(x, y, z));
             cachePoint(new CachedPoint(packet.getId(), x, y, z, PointType.NETWORK_ENTITY, System.currentTimeMillis(), chunk));
 
         } else if (event.packet instanceof ClientboundEntityPositionSyncPacket packet) {
@@ -165,7 +165,7 @@ public class WorldStateVisualizer extends Module {
             var key = BuiltInRegistries.BLOCK_ENTITY_TYPE.getKey(packet.getType());
             if (key == null || !key.toString().equals("minecraft:mob_spawner")) return;
             BlockPos pos = packet.getPos();
-            ChunkPos chunk = ChunkPos.containing(pos);
+            ChunkPos chunk = new ChunkPos(pos);
             cachePoint(new CachedPoint(pos.hashCode(), pos.getX(), pos.getY(), pos.getZ(), PointType.BLOCK_ENTITY, System.currentTimeMillis(), chunk));
             notableChunks.add(chunk);
 
@@ -173,7 +173,7 @@ public class WorldStateVisualizer extends Module {
             if (!cacheAudioCues.get()) return;
             if (!isNetworkEntitySound(packet.getSound().value())) return;
             double x = packet.getX(), y = packet.getY(), z = packet.getZ();
-            ChunkPos chunk = ChunkPos.containing(BlockPos.containing(x, y, z));
+            ChunkPos chunk = new ChunkPos(BlockPos.containing(x, y, z));
             cachePoint(new CachedPoint(BlockPos.containing(x, y, z).hashCode(), x, y, z, PointType.NETWORK_ENTITY, System.currentTimeMillis(), chunk));
 
         } else if (event.packet instanceof ClientboundLevelParticlesPacket packet) {
@@ -182,7 +182,7 @@ public class WorldStateVisualizer extends Module {
             if (pointType == null) return;
             double x = packet.getX(), y = packet.getY(), z = packet.getZ();
             BlockPos blockPos = BlockPos.containing(x, y, z);
-            ChunkPos chunk = ChunkPos.containing(blockPos);
+            ChunkPos chunk = new ChunkPos(blockPos);
             cachePoint(new CachedPoint(blockPos.hashCode(), x, y, z, pointType, System.currentTimeMillis(), chunk));
             if (pointType == PointType.BLOCK_ENTITY) notableChunks.add(chunk);
         }
@@ -195,7 +195,7 @@ public class WorldStateVisualizer extends Module {
     private void updatePosition(int id, double x, double y, double z) {
         CachedPoint existing = cachedPoints.get(id);
         if (existing == null) return;
-        cachedPoints.put(id, new CachedPoint(id, x, y, z, existing.type(), System.currentTimeMillis(), ChunkPos.containing(BlockPos.containing(x, y, z))));
+        cachedPoints.put(id, new CachedPoint(id, x, y, z, existing.type(), System.currentTimeMillis(), new ChunkPos(BlockPos.containing(x, y, z))));
     }
 
     private boolean isNetworkEntitySound(SoundEvent sound) {
