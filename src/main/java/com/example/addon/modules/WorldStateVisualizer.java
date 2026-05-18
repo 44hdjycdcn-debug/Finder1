@@ -24,6 +24,8 @@ import net.minecraft.sounds.SoundEvent;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.entity.SpawnerBlockEntity;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Map;
@@ -57,7 +59,7 @@ public class WorldStateVisualizer extends Module {
     private final Setting<Integer> cacheRetention = sgGeneral.add(new IntSetting.Builder()
         .name("cacheRetention")
         .description("How long in milliseconds to retain cached points.")
-        .defaultValue(5000)
+        .defaultValue(30000)
         .min(1000)
         .max(30000)
         .sliderRange(1000, 30000)
@@ -132,6 +134,7 @@ public class WorldStateVisualizer extends Module {
     public final Map<Integer, CachedPoint> cachedPoints = new ConcurrentHashMap<>();
     public final Set<ChunkPos> notableChunks = ConcurrentHashMap.newKeySet();
     private final Color tempSide = new Color();
+    private int tickCounter = 0;
 
     public WorldStateVisualizer() {
         super(AddonTemplate.CATEGORY, "world-state-visualizer", "Passively visualizes cached world state data received from the server.");
@@ -205,8 +208,30 @@ public class WorldStateVisualizer extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        if (!active.get() || mc.level == null) return;
+        if (!active.get() || mc.level == null || mc.player == null) return;
         pruneCache();
+        if (++tickCounter >= 100) {
+            tickCounter = 0;
+            scanForSpawners();
+        }
+    }
+
+    private void scanForSpawners() {
+        int chunkRadius = (cacheRange.get() >> 4) + 1;
+        int playerChunkX = mc.player.chunkPosition().x;
+        int playerChunkZ = mc.player.chunkPosition().z;
+        long now = System.currentTimeMillis();
+        for (int cx = playerChunkX - chunkRadius; cx <= playerChunkX + chunkRadius; cx++) {
+            for (int cz = playerChunkZ - chunkRadius; cz <= playerChunkZ + chunkRadius; cz++) {
+                if (!mc.level.hasChunk(cx, cz)) continue;
+                LevelChunk chunk = (LevelChunk) mc.level.getChunk(cx, cz);
+                for (BlockPos pos : chunk.getBlockEntitiesPos()) {
+                    if (!(mc.level.getBlockEntity(pos) instanceof SpawnerBlockEntity)) continue;
+                    ChunkPos chunkPos = new ChunkPos(pos);
+                    cachePoint(new CachedPoint(pos.hashCode(), pos.getX(), pos.getY(), pos.getZ(), PointType.BLOCK_ENTITY, now, chunkPos));
+                }
+            }
+        }
     }
 
     private void pruneCache() {
