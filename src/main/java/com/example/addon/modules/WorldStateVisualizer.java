@@ -20,7 +20,13 @@ import net.minecraft.world.entity.*;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.FishingHook;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.PressurePlateBlock;
+import net.minecraft.world.level.block.TripWireBlock;
+import net.minecraft.world.level.block.WeightedPressurePlateBlock;
 import net.minecraft.world.level.block.entity.SpawnerBlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.Vec3;
 
@@ -182,6 +188,41 @@ public class WorldStateVisualizer extends Module {
         .build()
     );
 
+    private final Setting<Boolean> projectileOwnerDetection = sgDetection.add(new BoolSetting.Builder()
+        .name("projectileOwnerDetection")
+        .description("Flag projectiles shot by entity IDs not in the client entity list.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> blockInteractionDetection = sgDetection.add(new BoolSetting.Builder()
+        .name("blockInteractionDetection")
+        .description("Flag pressure plates and tripwires triggered with no visible entity nearby.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> equipmentDetection = sgDetection.add(new BoolSetting.Builder()
+        .name("equipmentDetection")
+        .description("Flag equipment changes for entities not in the client entity list.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> effectDetection = sgDetection.add(new BoolSetting.Builder()
+        .name("effectDetection")
+        .description("Flag mob effects applied to entities not in the client entity list.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> containerDetection = sgDetection.add(new BoolSetting.Builder()
+        .name("containerDetection")
+        .description("Flag containers opened with no visible player nearby.")
+        .defaultValue(true)
+        .build()
+    );
+
     // ── State ─────────────────────────────────────────────────────────────────
 
     public final Map<Integer, CachedPoint> cachedPoints = new ConcurrentHashMap<>();
@@ -236,6 +277,15 @@ public class WorldStateVisualizer extends Module {
                 cachePoint(new CachedPoint(packet.getId(), x, y, z, PointType.NETWORK_ENTITY,
                     System.currentTimeMillis(), new ChunkPos(BlockPos.containing(x, y, z))));
             }
+            if (projectileOwnerDetection.get() && isPlayerProjectile(packet.getType())) {
+                int ownerId = packet.getData();
+                if (ownerId > 0 && !knownEntityIds.contains(ownerId)) {
+                    double x = packet.getX(), y = packet.getY(), z = packet.getZ();
+                    notifyAndCacheAnomaly(ownerId, x, y, z,
+                        "Projectile from hidden shooter near " + (int)x + ", " + (int)y + ", " + (int)z,
+                        System.currentTimeMillis());
+                }
+            }
 
         } else if (event.packet instanceof ClientboundRemoveEntitiesPacket packet) {
             for (int id : packet.getEntityIds()) {
@@ -272,6 +322,74 @@ public class WorldStateVisualizer extends Module {
             ChunkPos chunk = new ChunkPos(bp);
             cachePoint(new CachedPoint(bp.hashCode(), x, y, z, pointType, System.currentTimeMillis(), chunk));
             if (pointType == PointType.BLOCK_ENTITY) notableChunks.add(chunk);
+
+        } else if (equipmentDetection.get() && event.packet instanceof ClientboundSetEquipmentPacket packet) {
+            int entityId = packet.getEntity();
+            if (mc.player != null && entityId != mc.player.getId() && !knownEntityIds.contains(entityId)) {
+                long now = System.currentTimeMillis();
+                Entity e = mc.level.getEntity(entityId);
+                double x = e != null ? e.getX() : mc.player.getX();
+                double y = e != null ? e.getY() : mc.player.getY();
+                double z = e != null ? e.getZ() : mc.player.getZ();
+                notifyAndCacheAnomaly(entityId, x, y, z,
+                    "Equipment update for hidden entity near " + (int)x + ", " + (int)y + ", " + (int)z, now);
+            }
+
+        } else if (effectDetection.get() && event.packet instanceof ClientboundUpdateMobEffectPacket packet) {
+            int entityId = packet.getEntityId();
+            if (mc.player != null && entityId != mc.player.getId() && !knownEntityIds.contains(entityId)) {
+                long now = System.currentTimeMillis();
+                Entity e = mc.level.getEntity(entityId);
+                double x = e != null ? e.getX() : mc.player.getX();
+                double y = e != null ? e.getY() : mc.player.getY();
+                double z = e != null ? e.getZ() : mc.player.getZ();
+                notifyAndCacheAnomaly(entityId, x, y, z,
+                    "Mob effect on hidden entity near " + (int)x + ", " + (int)y + ", " + (int)z, now);
+            }
+
+        } else if (blockInteractionDetection.get() && event.packet instanceof ClientboundBlockUpdatePacket packet) {
+            if (mc.player == null) return;
+            BlockState state = packet.getBlockState();
+            if (isInteractiveBlockActivation(state)) {
+                BlockPos pos = packet.getPos();
+                if (mc.player.blockPosition().distSqr(pos) < 9) return;
+                boolean knownNearby = false;
+                if (mc.level != null) {
+                    for (Entity e : mc.level.entitiesForRendering()) {
+                        if (e.getId() == mc.player.getId()) continue;
+                        if (knownEntityIds.contains(e.getId()) && e.blockPosition().distSqr(pos) < 9) {
+                            knownNearby = true;
+                            break;
+                        }
+                    }
+                }
+                if (!knownNearby) {
+                    notifyAndCacheAnomaly(pos.hashCode(), pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5,
+                        "Interactive block triggered by hidden entity at " + pos.getX() + ", " + pos.getY() + ", " + pos.getZ(),
+                        System.currentTimeMillis());
+                }
+            }
+
+        } else if (containerDetection.get() && event.packet instanceof ClientboundBlockEventPacket packet) {
+            if (mc.player == null) return;
+            if (packet.getB0() == 1 && packet.getB1() > 0) {
+                BlockPos pos = packet.getPos();
+                boolean knownPlayerNearby = mc.player.blockPosition().distSqr(pos) < 25;
+                if (!knownPlayerNearby && mc.level != null) {
+                    for (Entity e : mc.level.entitiesForRendering()) {
+                        if (!(e instanceof Player)) continue;
+                        if (knownEntityIds.contains(e.getId()) && e.blockPosition().distSqr(pos) < 25) {
+                            knownPlayerNearby = true;
+                            break;
+                        }
+                    }
+                }
+                if (!knownPlayerNearby) {
+                    notifyAndCacheAnomaly(pos.hashCode(), pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5,
+                        "Container opened by hidden player at " + pos.getX() + ", " + pos.getY() + ", " + pos.getZ(),
+                        System.currentTimeMillis());
+                }
+            }
         }
     }
 
@@ -477,6 +595,26 @@ public class WorldStateVisualizer extends Module {
             return PointType.BLOCK_ENTITY;
         }
         return null;
+    }
+
+    private boolean isPlayerProjectile(EntityType<?> type) {
+        return type == EntityType.ARROW || type == EntityType.SPECTRAL_ARROW ||
+               type == EntityType.TRIDENT || type == EntityType.SNOWBALL ||
+               type == EntityType.EGG || type == EntityType.WIND_CHARGE;
+    }
+
+    private boolean isInteractiveBlockActivation(BlockState state) {
+        Block block = state.getBlock();
+        if (block instanceof PressurePlateBlock && state.hasProperty(BlockStateProperties.POWERED)) {
+            return state.getValue(BlockStateProperties.POWERED);
+        }
+        if (block instanceof WeightedPressurePlateBlock && state.hasProperty(BlockStateProperties.POWER)) {
+            return state.getValue(BlockStateProperties.POWER) > 0;
+        }
+        if (block instanceof TripWireBlock && state.hasProperty(BlockStateProperties.POWERED)) {
+            return state.getValue(BlockStateProperties.POWERED);
+        }
+        return false;
     }
 
     // ── Rendering ─────────────────────────────────────────────────────────────
